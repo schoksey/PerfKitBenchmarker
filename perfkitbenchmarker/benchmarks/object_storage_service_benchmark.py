@@ -45,10 +45,20 @@ from perfkitbenchmarker import sample
 from perfkitbenchmarker import vm_util
 from perfkitbenchmarker.sample import PercentileCalculator  # noqa
 
+
 flags.DEFINE_enum('storage', benchmark_spec_class.GCP,
                   [benchmark_spec_class.GCP, benchmark_spec_class.AWS,
                    benchmark_spec_class.AZURE],
                   'storage provider (GCP/AZURE/AWS) to use.')
+
+flags.DEFINE_string('object_storage_gcp_region', 'us-central1',
+                    'Region for GCP object storage.')
+
+flags.DEFINE_string('object_storage_aws_region', 'us-east-1',
+                    'Region for AWS object storage.')
+
+flags.DEFINE_string('object_storage_azure_region', 'East US',
+                    'Region for Azure object storage.')
 
 flags.DEFINE_enum('object_storage_scenario', 'all',
                   ['all', 'cli', 'api_data', 'api_namespace'],
@@ -142,8 +152,6 @@ CONTENT_REMOVAL_RETRY_LIMIT = 5
 # necessary for some providers.
 BUCKET_REMOVAL_RETRY_LIMIT = 120
 RETRY_WAIT_INTERVAL_SECONDS = 30
-
-DEFAULT_GCS_REGION = 'US-CENTRAL1'
 
 
 def GetInfo():
@@ -529,8 +537,10 @@ class S3StorageBenchmark(object):
     vm.PushFile(FLAGS.boto_file_location, DEFAULT_BOTO_LOCATION)
 
     self.bucket_name = 'pkb%s' % FLAGS.run_uri
+
     vm.RemoteCommand(
-        'aws s3 mb s3://%s --region=us-east-1' % self.bucket_name)
+        'aws s3 mb s3://%s --region=%s' % (
+            self.bucket_name, FLAGS.object_storage_aws_region))
 
   def Run(self, vm, metadata):
     """Run upload/download on vm with s3 tool.
@@ -602,13 +612,15 @@ class AzureBlobStorageBenchmark(object):
     Args:
       vm: The vm being used to run the benchmark.
     """
+
     vm.Install('node_js')
     vm.RemoteCommand('sudo npm install azure-cli -g')
 
     vm.PushFile(FLAGS.object_storage_credential_file, AZURE_CREDENTIAL_LOCATION)
     vm.RemoteCommand(
-        'azure storage account create --type ZRS -l \'East US\' ''"pkb%s"' %
-        (FLAGS.run_uri), ignore_failure=False)
+        'azure storage account create --type ZRS -l \'%s\' ''"pkb%s"' %
+        (FLAGS.object_storage_azure_region, FLAGS.run_uri),
+        ignore_failure=False)
     vm.azure_account = ('pkb%s' % FLAGS.run_uri)
 
     output, _ = (
@@ -767,11 +779,12 @@ class GoogleCloudStorageBenchmark(object):
     self.bucket_name = 'pkb%s' % FLAGS.run_uri
     vm.RemoteCommand('%s mb gs://%s' % (vm.gsutil_path, self.bucket_name))
 
-    self.regional_bucket_name = '%s-%s' % (self.bucket_name,
-                                           DEFAULT_GCS_REGION.lower())
-    vm.RemoteCommand('%s mb -c DRA -l %s gs://%s' % (vm.gsutil_path,
-                                                     DEFAULT_GCS_REGION,
-                                                     self.regional_bucket_name))
+    self.regional_bucket_name = '%s-%s' % (
+        self.bucket_name, FLAGS.object_storage_gcp_region.lower())
+    vm.RemoteCommand('%s mb -c DRA -l %s gs://%s' % (
+        vm.gsutil_path,
+        FLAGS.object_storage_gcp_region.upper(),
+        self.regional_bucket_name))
 
     # Detect if we need to install crcmod for gcp.
     # See "gsutil help crc" for details.
@@ -865,6 +878,24 @@ OBJECT_STORAGE_BENCHMARK_DICTIONARY = {
     benchmark_spec_class.AZURE: AzureBlobStorageBenchmark()}
 
 
+WRONG_REGION_FLAGS = {
+    benchmark_spec_class.GCP: ['object_storage_aws_region',
+                               'object_storage_azure_region'],
+    benchmark_spec_class.AWS: ['object_storage_gcp_region',
+                               'object_storage_azure_region'],
+    benchmark_spec_class.AZURE: ['object_storage_gcp_region',
+                                 'object_storage_aws_region']}
+
+
+def CheckWrongRegionFlags():
+  wrong_flags = WRONG_REGION_FLAGS[FLAGS.storage]
+
+  for flag_name in wrong_flags:
+    if FLAGS[flag_name].present:
+      logging.warning('Flag %s does not apply with storage %s',
+                      flag_name, FLAGS.storage)
+
+
 def Prepare(benchmark_spec):
   """Prepare vm with cloud provider tool and prepare vm with data file.
 
@@ -872,6 +903,9 @@ def Prepare(benchmark_spec):
     benchmark_spec: The benchmark specification. Contains all data that is
         required to run the benchmark.
   """
+
+  CheckWrongRegionFlags()
+
   vms = benchmark_spec.vms
   if not FLAGS.object_storage_credential_file:
     FLAGS.object_storage_credential_file = (
