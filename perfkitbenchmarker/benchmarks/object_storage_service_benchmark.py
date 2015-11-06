@@ -153,6 +153,21 @@ CONTENT_REMOVAL_RETRY_LIMIT = 5
 BUCKET_REMOVAL_RETRY_LIMIT = 120
 RETRY_WAIT_INTERVAL_SECONDS = 30
 
+# The endpoints in this table are subdomains of 'amazonaws.com'. So
+# where the table says 's3-us-west-2', you should connect to
+# 's3-us-west-2.amazonaws.com'.
+AWS_REGION_TO_ENDPOINT_TABLE = {
+    'us-east-1': 's3-external-1',
+    'us-west-2': 's3-us-west-2',
+    'us-west-1': 's3-us-west-1',
+    'eu-west-1': 's3-eu-west-1',
+    'eu-central-1': 's3-eu-central-1',
+    'ap-southeast-1': 's3-ap-southeast-1',
+    'ap-southeast-2': 's3-ap-southeast-2',
+    'ap-northeast-1': 's3-ap-northeast-1',
+    'sa-east-1': 's3-sa-east-1'
+}
+
 
 def GetInfo():
   return BENCHMARK_INFO
@@ -211,7 +226,7 @@ def _MakeAzureCommandSuffix(account_name, account_key, for_cli):
 
 def ApiBasedBenchmarks(results, metadata, vm, storage, test_script_path,
                        bucket_name, regional_bucket_name=None,
-                       azure_command_suffix=None):
+                       azure_command_suffix=None, host_to_connect=None):
     """This function contains all api-based benchmarks.
        It uses the value of the global flag "object_storage_scenario" to
        decide which scenario to run inside this function. The caller simply
@@ -226,6 +241,7 @@ def ApiBasedBenchmarks(results, metadata, vm, storage, test_script_path,
       bucket_name: The name of the bucket caller has created for this test.
       regional_bucket_name: The name of the "regional" bucket, if applicable.
       azure_command_suffix: A suffix for all Azure related test commands.
+      host_to_connect: An optional endpoint string to connect to.
 
     Raises:
       ValueError: unexpected test outcome is found from the API test script.
@@ -233,6 +249,28 @@ def ApiBasedBenchmarks(results, metadata, vm, storage, test_script_path,
     if FLAGS.object_storage_scenario == 'cli':
       # User only wants to run the CLI based tests, do nothing here:
       return
+
+    def BuildCommandString(args):
+      """Build a command string for the API test script.
+
+      Args:
+        A list of strings. These will become space-separated arguments to the
+          test script.
+
+      Returns:
+        A string that can be passed to vm.RemoteCommand.
+      """
+
+      cmd_parts = [
+          test_script_path,
+          '--storage_provider=%s' % storage
+      ] + args
+      if azure_command_suffix is not None:
+        cmd_parts += [azure_command_suffix]
+      if host_to_connect is not None:
+        cmd_parts += ['--host', host_to_connect]
+
+      return ' '.join(cmd_parts)
 
     if (FLAGS.object_storage_scenario == 'all' or
         FLAGS.object_storage_scenario == 'api_data'):
@@ -242,12 +280,9 @@ def ApiBasedBenchmarks(results, metadata, vm, storage, test_script_path,
         buckets.append(regional_bucket_name)
 
       for bucket in buckets:
-        one_byte_rw_cmd = ('%s --bucket=%s --storage_provider=%s '
-                           '--scenario=OneByteRW') % (
-                               test_script_path, bucket, storage)
-
-        if azure_command_suffix is not None:
-          one_byte_rw_cmd = ('%s %s') % (one_byte_rw_cmd, azure_command_suffix)
+        one_byte_rw_cmd = BuildCommandString([
+            '--bucket=%s' % bucket,
+            '--scenario=OneByteRW'])
 
         _, raw_result = vm.RemoteCommand(one_byte_rw_cmd)
         logging.info('OneByteRW raw result is %s', raw_result)
@@ -270,14 +305,8 @@ def ApiBasedBenchmarks(results, metadata, vm, storage, test_script_path,
                              '%s.' % raw_result)
 
       # Single stream large object throughput metrics
-      single_stream_throughput_cmd = ('%s --bucket=%s --storage_provider=%s '
-                                      '--scenario=SingleStreamThroughput') % (
-                                          test_script_path,
-                                          bucket_name,
-                                          storage)
-      if azure_command_suffix is not None:
-        single_stream_throughput_cmd = ('%s %s') % (
-            single_stream_throughput_cmd, azure_command_suffix)
+      single_stream_throughput_cmd = BuildCommandString([
+          '--bucket=%s' % bucket_name])
 
       _, raw_result = vm.RemoteCommand(single_stream_throughput_cmd)
       logging.info('SingleStreamThroughput raw result is %s', raw_result)
@@ -305,17 +334,10 @@ def ApiBasedBenchmarks(results, metadata, vm, storage, test_script_path,
     if (FLAGS.object_storage_scenario == 'all' or
         FLAGS.object_storage_scenario == 'api_namespace'):
       # list-after-write consistency metrics
-      list_consistency_cmd = ('%s --bucket=%s --storage_provider=%s '
-                              '--iterations=%d --scenario=ListConsistency') % (
-                                  test_script_path,
-                                  bucket_name,
-                                  storage,
-                                  LIST_CONSISTENCY_ITERATIONS)
-
-      if azure_command_suffix is not None:
-        list_consistency_cmd = ('%s %s') % (list_consistency_cmd,
-                                            azure_command_suffix)
-
+      list_consistency_cmd = BuildCommandString([
+          '--bucket=%s' % bucket_name,
+          '--iterations=%d' % LIST_CONSISTENCY_ITERATIONS,
+          '--scenario=ListConsistency'])
 
       _, raw_result = vm.RemoteCommand(list_consistency_cmd)
       logging.info('ListConsistency raw result is %s', raw_result)
@@ -582,8 +604,10 @@ class S3StorageBenchmark(object):
 
     # Now tests the storage provider via APIs
     test_script_path = '%s/run/%s' % (scratch_dir, API_TEST_SCRIPT)
+    hostname = AWS_REGION_TO_ENDPOINT_TABLE[FLAGS.object_storage_aws_region]
     ApiBasedBenchmarks(results, metadata, vm, 'S3', test_script_path,
-                       self.bucket_name)
+                       self.bucket_name,
+                       host_to_connect=hostname + '.amazonaws.com')
 
     return results
 
@@ -888,6 +912,12 @@ WRONG_REGION_FLAGS = {
 
 
 def CheckWrongRegionFlags():
+  """Issue a warning if the user passes the wrong region flag.
+
+  If the user specifies a region flag that does not match the storage
+  provider flag, print a warning.
+  """
+
   wrong_flags = WRONG_REGION_FLAGS[FLAGS.storage]
 
   for flag_name in wrong_flags:
